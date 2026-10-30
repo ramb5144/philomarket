@@ -2,10 +2,15 @@ import { getAdminServices } from '../server/firebaseAdmin.js';
 import { handleApiError, methodNotAllowed, profileFrom, readJson, requireVerifiedUser, sendJson } from '../server/http.js';
 import { appendPriceHistory, MARKET_LIQUIDITY } from '../marketMath.js';
 import { readAccountContext, writeAccountContext } from '../server/accounts.js';
+import { buildAuditEvent, clientIp, requestFingerprint, writeAuditEvent } from '../server/abuseAudit.js';
+import { createMarketCache } from '../server/abuseMarketCache.js';
+import { createWindowLimiter } from '../server/abuseRateLimit.js';
 
 const DEFAULT_MARKET_ID = 'scriba-first';
 const MAX_MARKETS_PER_USER = 10;
 const MAX_MARKETS_RETURNED = 200;
+const marketCache = createMarketCache();
+const allowListRead = createWindowLimiter({ limit: 60, windowMs: 60_000 });
 const SCRIBA_NAMES = [
   'Isai Medina', 'Rowan Liddell', 'Emily Tacey', 'Emylee Perkins', 'Betsy Barnard',
   'Qaira Saldivar', 'Omer Alp Danis', 'Grace Burke', 'David Li', 'Nicholas Ingram', 'Bobby McCann',
@@ -16,10 +21,9 @@ function outcomeId(label, index) {
   return `${stem}-${index + 1}`;
 }
 
-function presentMarket(snapshot, currentUid = null) {
-  const data = snapshot.data();
+function presentMarket({ id, data }, currentUid = null) {
   return {
-    id: snapshot.id,
+    id,
     question: data.question,
     outcomes: data.outcomes,
     liquidity: data.liquidity || MARKET_LIQUIDITY,
@@ -36,6 +40,9 @@ function presentMarket(snapshot, currentUid = null) {
 
 async function seedDefaultMarket(db, FieldValue) {
   const marketRef = db.collection('markets').doc(DEFAULT_MARKET_ID);
+  // Plain read first: a transaction here on every listing contended with
+  // trades on the default market and caused aborted trades under load.
+  if ((await marketRef.get()).exists) return;
   const outcomes = SCRIBA_NAMES.map((label, index) => ({ id: outcomeId(label, index), label, shares: 0 }));
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(marketRef);
@@ -99,6 +106,9 @@ export default async function handler(req, res) {
   try {
     const { db, FieldValue, auth } = getAdminServices();
     if (req.method === 'GET') {
+      if (!allowListRead(clientIp(req))) {
+        throw Object.assign(new Error('Too many requests. Try again in a minute.'), { status: 429 });
+      }
       let currentUid = null;
       const bearer = (req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
       if (bearer) {
@@ -107,15 +117,18 @@ export default async function handler(req, res) {
           if (decoded.email_verified === true) currentUid = decoded.uid;
         } catch { /* Browsing is public; a stale token only hides "My markets". */ }
       }
-      await seedDefaultMarket(db, FieldValue);
-      const snapshot = await db.collection('markets')
-        .orderBy('createdAt', 'desc')
-        .limit(MAX_MARKETS_RETURNED)
-        .get();
-      let marketDocs = snapshot.docs;
+      let cached = await marketCache.list(db);
+      if (!cached.some((doc) => doc.id === DEFAULT_MARKET_ID)) {
+        await seedDefaultMarket(db, FieldValue);
+        marketCache.invalidate();
+        cached = await marketCache.list(db);
+      }
+      const createdMs = (doc) => doc.data.createdAt?.toMillis?.() ?? 0;
+      const newestFirst = cached.slice().sort((a, b) => createdMs(b) - createdMs(a));
+      let marketDocs = newestFirst.slice(0, MAX_MARKETS_RETURNED);
       if (!marketDocs.some((doc) => doc.id === DEFAULT_MARKET_ID)) {
-        const defaultMarket = await db.collection('markets').doc(DEFAULT_MARKET_ID).get();
-        if (defaultMarket.exists) marketDocs = [...marketDocs.slice(0, MAX_MARKETS_RETURNED - 1), defaultMarket];
+        const defaultMarket = newestFirst.find((doc) => doc.id === DEFAULT_MARKET_ID);
+        if (defaultMarket) marketDocs = [...marketDocs.slice(0, MAX_MARKETS_RETURNED - 1), defaultMarket];
       }
       const markets = marketDocs.map((doc) => presentMarket(doc, currentUid)).sort((a, b) => {
         const liquidity = (Number(b.liquidityReserve) || 0) - (Number(a.liquidityReserve) || 0);
@@ -155,14 +168,18 @@ export default async function handler(req, res) {
       const userData = account.userData;
       const marketsCreated = Number(userData.marketsCreated) || 0;
       if (marketsCreated >= MAX_MARKETS_PER_USER) {
-        throw Object.assign(new Error(`Each account can create up to ${MAX_MARKETS_PER_USER} markets.`), { status: 429 });
+        throw Object.assign(new Error('You have reached the market creation limit for this account.'), { status: 429 });
       }
       const updatedUser = { ...userData, marketsCreated: marketsCreated + 1 };
       transaction.create(marketRef, marketData);
       writeAccountContext(transaction, account, FieldValue, { marketsCreated: updatedUser.marketsCreated });
+      writeAuditEvent(transaction, db, buildAuditEvent({
+        type: 'market_create', uid: decoded.uid, marketId: marketRef.id, fingerprint: requestFingerprint(req),
+      }), FieldValue);
       return profileFrom(decoded.uid, decoded.email || '', updatedUser);
     });
 
+    marketCache.invalidate();
     return sendJson(res, 201, {
       market: {
         id: marketRef.id,

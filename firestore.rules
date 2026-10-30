@@ -1,9 +1,9 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // All market and points reads/writes go through the verified Vercel API.
-    // The Admin SDK is the only writer; it validates email verification and
-    // applies point changes inside Firestore transactions.
+    // Deny all client access. Every read and write goes through the server
+    // API using the Admin SDK, which bypasses these rules. This includes the
+    // server-only auditLog, idempotencyKeys, and accountEmails collections.
     match /{document=**} {
       allow read, write: if false;
     }

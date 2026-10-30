@@ -1,9 +1,17 @@
 import { getAdminServices } from './firebaseAdmin.js';
 
+const MAX_BODY_BYTES = 16_000;
+const MAX_ID_TOKEN_LENGTH = 4_096;
+
+function clientError(message, status) {
+  return Object.assign(new Error(message), { status });
+}
+
 export function sendJson(res, status, body, { cacheControl = 'no-store' } = {}) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', cacheControl);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.end(JSON.stringify(body));
 }
 
@@ -12,69 +20,102 @@ export function methodNotAllowed(res, allowed) {
   sendJson(res, 405, { error: 'Method not allowed.' });
 }
 
+function parseObject(text) {
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw clientError('Request is too large.', 413);
+  if (!text) return {};
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch { throw clientError('Request body must be valid JSON.', 400); }
+  return requireObject(parsed);
+}
+
+function requireObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw clientError('Request body must be a JSON object.', 400);
+  }
+  return value;
+}
+
 export async function readJson(req) {
-  if (req.body && typeof req.body === 'object') {
-    if (Buffer.byteLength(JSON.stringify(req.body), 'utf8') > 16_000) {
-      throw Object.assign(new Error('Request is too large.'), { status: 413 });
+  // Vercel's req.body is a lazy getter that throws on malformed JSON.
+  let body;
+  try { body = req.body; }
+  catch { throw clientError('Request body must be valid JSON.', 400); }
+
+  if (Buffer.isBuffer(body)) return parseObject(body.toString('utf8'));
+  if (typeof body === 'string') return parseObject(body);
+  if (body && typeof body === 'object') {
+    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_BODY_BYTES) {
+      throw clientError('Request is too large.', 413);
     }
-    return req.body;
+    return requireObject(body);
   }
-  if (typeof req.body === 'string') {
-    if (Buffer.byteLength(req.body, 'utf8') > 16_000) {
-      throw Object.assign(new Error('Request is too large.'), { status: 413 });
-    }
-    try { return JSON.parse(req.body); }
-    catch { throw Object.assign(new Error('Request body must be valid JSON.'), { status: 400 }); }
-  }
+
   let raw = '';
   for await (const chunk of req) {
     raw += chunk;
-    if (Buffer.byteLength(raw, 'utf8') > 16_000) {
-      throw Object.assign(new Error('Request is too large.'), { status: 413 });
-    }
+    if (Buffer.byteLength(raw, 'utf8') > MAX_BODY_BYTES) throw clientError('Request is too large.', 413);
   }
-  if (!raw) return {};
-  try { return JSON.parse(raw); }
-  catch { throw Object.assign(new Error('Request body must be valid JSON.'), { status: 400 }); }
+  return parseObject(raw);
+}
+
+// Exported for tests. An empty allowlist only means "allow any verified email"
+// under `vercel dev`; every other environment (Vercel Preview/Production, or
+// any non-Vercel host where VERCEL_ENV is unset) fails closed.
+export function assertEmailAllowed(rawEmail, env = process.env) {
+  const allowedEmails = (env.PHILOMARKET_ALLOWED_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+  const isLocalDev = env.VERCEL_ENV === 'development';
+  if (allowedEmails.length === 0) {
+    if (isLocalDev) return;
+    throw clientError('The club email allowlist is not configured.', 503);
+  }
+  if (allowedEmails.includes('*')) return;
+  const email = String(rawEmail || '').trim().toLowerCase();
+  if (!email || !allowedEmails.includes(email)) {
+    throw clientError('This verified email is not on the Philomarket club allowlist.', 403);
+  }
 }
 
 export async function requireVerifiedUser(req) {
-  const header = req.headers.authorization || '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) throw Object.assign(new Error('Sign in with a verified email to continue.'), { status: 401 });
+  const header = req.headers?.authorization || '';
+  const match = header.match(/^Bearer\s+(\S+)$/i);
+  if (!match || match[1].length > MAX_ID_TOKEN_LENGTH) {
+    throw clientError('Sign in with a verified email to continue.', 401);
+  }
 
   const { auth } = getAdminServices();
   let decoded;
   try {
     decoded = await auth.verifyIdToken(match[1], true);
   } catch {
-    throw Object.assign(new Error('Your sign-in expired. Sign in again to continue.'), { status: 401 });
+    throw clientError('Your sign-in expired. Sign in again to continue.', 401);
   }
   if (decoded.email_verified !== true) {
-    throw Object.assign(new Error('Verify your email before using points or creating markets.'), { status: 403 });
+    throw clientError('Verify your email before using points or creating markets.', 403);
   }
-
-  const allowedEmails = (process.env.PHILOMARKET_ALLOWED_EMAILS || '')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
-  const isHosted = Boolean(process.env.VERCEL_ENV && process.env.VERCEL_ENV !== 'development');
-  if (isHosted && allowedEmails.length === 0) {
-    throw Object.assign(new Error('The club email allowlist is not configured.'), { status: 503 });
-  }
-  const email = String(decoded.email || '').trim().toLowerCase();
-  if (allowedEmails.length > 0 && !allowedEmails.includes('*') && !allowedEmails.includes(email)) {
-    throw Object.assign(new Error('This verified email is not on the Philomarket club allowlist.'), { status: 403 });
-  }
+  assertEmailAllowed(decoded.email);
   return decoded;
 }
 
+// Only errors this codebase raised on purpose (a plain `Error` with an HTTP
+// status) keep their status. Library errors such as GaxiosError also expose
+// `.status`, but their messages can carry project ids, service-account emails,
+// or upstream details, so they become a generic 500. 5xx messages are never
+// sent to the client.
+function ownStatus(error) {
+  const plain = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype;
+  const status = error?.status;
+  return plain && Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
+}
+
 export function handleApiError(res, error) {
-  const status = Number.isInteger(error?.status) ? error.status : 500;
-  if (status >= 500) console.error('Philomarket API error:', error?.message || 'Unknown error');
-  sendJson(res, status, {
-    error: status >= 500 ? 'The market service is temporarily unavailable.' : error.message,
-  });
+  const status = ownStatus(error);
+  if (status < 500) return sendJson(res, status, { error: error.message });
+  console.error('Philomarket API error:', error?.name || 'Error', error?.message || 'Unknown error');
+  return sendJson(res, status, { error: 'The market service is temporarily unavailable.' });
 }
 
 export function makeUserRef(db, uid) {

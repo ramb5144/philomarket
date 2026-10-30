@@ -1,7 +1,11 @@
 import { getAdminServices } from '../../../server/firebaseAdmin.js';
 import { handleApiError, methodNotAllowed, profileFrom, readJson, requireVerifiedUser, sendJson } from '../../../server/http.js';
-import { appendPriceHistory, MARKET_LIQUIDITY, roundPoints, roundShares, sharesForSpend } from '../../../marketMath.js';
+import { appendPriceHistory, MARKET_LIQUIDITY, parsePointAmount, roundPoints, roundShares, sharesForSpend } from '../../../marketMath.js';
 import { enforceTradeCooldown, readAccountContext, writeAccountContext } from '../../../server/accounts.js';
+import {
+  buildAuditEvent, idempotencyRef, readIdempotencyKey, readIdempotentReplay, requestDigest,
+  requestFingerprint, writeAuditEvent, writeIdempotency,
+} from '../../../server/abuseAudit.js';
 
 function validMarketId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
@@ -29,10 +33,11 @@ export default async function handler(req, res) {
   try {
     const decoded = await requireVerifiedUser(req);
     const body = await readJson(req);
-    const rawAmount = Number(body?.amount);
-    const amount = roundPoints(rawAmount);
+    const amount = parsePointAmount(body?.amount);
     const outcomeId = typeof body?.outcomeId === 'string' ? body.outcomeId : '';
-    if (!Number.isFinite(rawAmount) || rawAmount < 0.01 || Math.abs(rawAmount - amount) > 1e-8) {
+    const idempotencyKey = readIdempotencyKey(req, body);
+    const fingerprint = requestFingerprint(req);
+    if (amount === null) {
       throw Object.assign(new Error('Enter a point amount from 0.01 up to your remaining balance.'), { status: 400 });
     }
     if (!outcomeId || outcomeId.length > 80) {
@@ -44,8 +49,13 @@ export default async function handler(req, res) {
     if (!validMarketId(marketId)) throw Object.assign(new Error('Market not found.'), { status: 404 });
     const marketRef = db.collection('markets').doc(marketId);
     const positionRef = marketRef.collection('positions').doc(decoded.uid);
+    const replayRef = idempotencyKey ? idempotencyRef(db, decoded.uid, idempotencyKey) : null;
+    const digest = requestDigest('buy', { marketId, outcomeId, amount });
 
     const result = await db.runTransaction(async (transaction) => {
+      // A replayed key returns the original result without trading again.
+      const replay = await readIdempotentReplay(transaction, replayRef, decoded.uid, digest);
+      if (replay) return replay;
       const account = await readAccountContext(transaction, db, decoded);
       const [marketSnapshot, positionSnapshot] = await Promise.all([
         transaction.get(marketRef),
@@ -124,12 +134,18 @@ export default async function handler(req, res) {
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      return {
+      const response = {
         profile: profileFrom(decoded.uid, decoded.email || '', updatedUser),
         market: presentMarket(marketId, updatedMarket, decoded.uid),
         position,
         costBasis,
       };
+      const nowMs = Date.now();
+      writeAuditEvent(transaction, db, buildAuditEvent({
+        type: 'buy', uid: decoded.uid, marketId, outcomeId, amount, shares: sharesBought, fingerprint, idempotencyKey, nowMs,
+      }), FieldValue);
+      writeIdempotency(transaction, replayRef, { uid: decoded.uid, route: 'buy', digest, response, nowMs }, FieldValue);
+      return response;
     });
 
     return sendJson(res, 200, result);

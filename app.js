@@ -7,6 +7,7 @@ import {
 } from 'firebase/auth';
 import { auth, firebaseConfigured } from './firebase.js';
 import { appendPriceHistory, floorPoints, MARKET_LIQUIDITY, marketProbabilities, proceedsForSale } from './marketMath.js';
+import { renderPriceChart as buildPriceChart, freshestHistory, historyStamp, seriesColor } from './priceChart.js';
 
 const INITIAL_POINTS = 500;
 const PREVIEW_KEY = 'philomarket.preview.v2';
@@ -16,10 +17,6 @@ const setupMissing = !firebaseConfigured && !previewMode;
 const initialNames = [
   'Isai Medina', 'Rowan Liddell', 'Emily Tacey', 'Emylee Perkins', 'Betsy Barnard',
   'Qaira Saldivar', 'Omer Alp Danis', 'Grace Burke', 'David Li', 'Nicholas Ingram', 'Bobby McCann',
-];
-const initialColors = [
-  '#3e6b69', '#8c7045', '#735a85', '#437762', '#a35b50', '#546f9b',
-  '#82703e', '#477a7e', '#83614d', '#687d4c', '#92596d',
 ];
 
 const el = {
@@ -200,7 +197,7 @@ function renderMarketList() {
     button.type = 'button';
     button.dataset.marketId = market.id;
     button.setAttribute('aria-pressed', String(market.id === state.selectedId));
-    const tag = element('span', 'market-list-tag', `${market.status === 'open' ? 'OPEN' : market.status.toUpperCase()}  ·  ${market.outcomes.length} OUTCOMES`);
+    const tag = element('span', 'market-list-tag', `${market.status === 'open' ? 'Open' : market.status}  ·  ${market.outcomes.length} outcomes`);
     const question = element('strong', 'market-list-question', market.question);
     const lead = market.outcomes.reduce((best, current) => marketChance(market, current) > marketChance(market, best) ? current : best, market.outcomes[0]);
     const details = element('span', 'market-list-details');
@@ -209,12 +206,10 @@ function renderMarketList() {
       element('span', 'market-pool-total', formatPoints(market.pointPool)),
     );
     const miniature = element('span', 'market-mini-bar');
-    market.outcomes.forEach((outcome, index) => {
-      const segment = element('i', 'mini-segment');
-      segment.style.flexGrow = String(marketChance(market, outcome));
-      segment.style.backgroundColor = initialColors[index % initialColors.length];
-      miniature.append(segment);
-    });
+    miniature.setAttribute('aria-hidden', 'true');
+    const leaderFill = element('i', 'mini-segment');
+    leaderFill.style.width = `${marketChance(market, lead)}%`;
+    miniature.append(leaderFill);
     button.append(tag, question, details, miniature);
     fragment.append(button);
   });
@@ -261,70 +256,9 @@ function updateStakeControls() {
 }
 
 function renderPriceChart(market) {
-  const section = element('section', 'price-chart-section');
-  const heading = element('div', 'price-chart-heading');
-  heading.append(element('h3', '', 'Price history'), element('span', '', 'Simulated $1 contract scale'));
-  section.append(heading);
-
-  const width = 720;
-  const height = 146;
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('class', 'price-chart');
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', `Price history for ${market.question}`);
-  [0, 0.25, 0.5, 0.75, 1].forEach((level) => {
-    const line = document.createElementNS(svg.namespaceURI, 'line');
-    const y = 8 + (height - 16) * (1 - level);
-    line.setAttribute('x1', '0');
-    line.setAttribute('x2', String(width));
-    line.setAttribute('y1', String(y));
-    line.setAttribute('y2', String(y));
-    line.setAttribute('class', 'chart-grid-line');
-    svg.append(line);
-  });
-
   const current = marketProbabilities(market.outcomes, market.liquidity || MARKET_LIQUIDITY);
-  const storedHistory = state.priceHistoryMarketId === market.id && state.priceHistory.length
-    ? state.priceHistory
-    : market.priceHistory;
-  const history = Array.isArray(storedHistory) && storedHistory.length
-    ? storedHistory.slice(-80)
-    : [{ at: Date.now(), prices: current }];
-  const start = Number(history[0]?.at) || 0;
-  const end = Number(history[history.length - 1]?.at) || start;
-  const xFor = (point, index) => end > start
-    ? ((Number(point.at) - start) / (end - start)) * width
-    : history.length > 1 ? (index / (history.length - 1)) * width : 0;
-  const yFor = (price) => 8 + (height - 16) * (1 - Math.max(0, Math.min(1, price)));
-
-  market.outcomes.forEach((outcome, outcomeIndex) => {
-    const points = history.map((point, index) => ({
-      x: xFor(point, index),
-      y: yFor(Number(point.prices?.[outcomeIndex]) || 0),
-    }));
-    if (points.length === 1) points.push({ x: width, y: points[0].y });
-    const path = document.createElementNS(svg.namespaceURI, 'path');
-    path.setAttribute('d', points.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' '));
-    path.setAttribute('class', 'chart-series');
-    path.setAttribute('stroke', initialColors[outcomeIndex % initialColors.length]);
-    path.setAttribute('aria-label', `${outcome.label}: $${(current[outcomeIndex] || 0).toFixed(2)}`);
-    svg.append(path);
-  });
-  section.append(svg);
-
-  const legend = element('div', 'price-chart-legend');
-  market.outcomes.forEach((outcome, index) => {
-    const item = element('span', 'chart-legend-item');
-    const dot = element('i', 'chart-legend-dot');
-    dot.style.backgroundColor = initialColors[index % initialColors.length];
-    const name = element('span', 'chart-legend-name', outcome.label);
-    const price = element('strong', '', `$${(current[index] || 0).toFixed(2)}`);
-    item.append(dot, name, price);
-    legend.append(item);
-  });
-  section.append(legend);
-  return section;
+  const history = freshestHistory(state.priceHistoryMarketId === market.id ? state.priceHistory : [], market.priceHistory);
+  return buildPriceChart({ market, history, current });
 }
 
 function renderMarketDetail() {
@@ -350,13 +284,13 @@ function renderMarketDetail() {
   const wrapper = element('div', 'detail-content');
   const top = element('div', 'detail-topline');
   const marketLabel = element('span', 'detail-market-label');
-  marketLabel.append(element('i', 'market-status-dot'), `${market.status === 'open' ? 'OPEN' : market.status.toUpperCase()}  ·  ${market.outcomes.length} OUTCOMES`);
+  marketLabel.append(element('i', 'market-status-dot'), `${market.status === 'open' ? 'Open' : market.status}  ·  ${market.outcomes.length} outcomes`);
   const refreshedAt = state.lastSynced
     ? `Updated ${new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(state.lastSynced)}`
     : 'Not synced yet';
   const refreshTools = element('div', 'refresh-tools');
   refreshTools.append(element('span', 'refresh-label', refreshedAt));
-  const refreshButton = element('button', 'refresh-button', '↻ Refresh');
+  const refreshButton = element('button', 'refresh-button', 'Refresh');
   refreshButton.type = 'button';
   refreshButton.setAttribute('aria-label', 'Refresh shared market odds');
   refreshButton.addEventListener('click', () => refreshMarkets());
@@ -365,15 +299,15 @@ function renderMarketDetail() {
 
   const title = element('h2', 'detail-title', market.question);
   title.id = 'detail-title';
-  const description = element('p', 'detail-description', 'The high-liquidity curve moves prices gradually. Selling follows the reverse curve, so a no-change buy-and-sell round trip cannot cash out higher.');
+  const description = element('p', 'detail-description', 'Prices move as members buy and sell. You can sell a pick back at the current price at any time while the market is open.');
 
   const stats = element('div', 'detail-stats');
   const poolStat = element('div', 'detail-stat');
-  poolStat.append(element('span', '', 'POINTS IN PLAY'), element('strong', '', formatPoints(market.pointPool)));
+  poolStat.append(element('span', '', 'Points in play'), element('strong', '', formatPoints(market.pointPool)));
   const tradesStat = element('div', 'detail-stat');
-  tradesStat.append(element('span', '', 'BACKERS'), element('strong', '', Number(market.backerCount || 0).toLocaleString()));
+  tradesStat.append(element('span', '', 'Backers'), element('strong', '', Number(market.backerCount || 0).toLocaleString()));
   const oddsStat = element('div', 'detail-stat');
-  oddsStat.append(element('span', '', 'OUTCOMES'), element('strong', '', String(market.outcomes.length)));
+  oddsStat.append(element('span', '', 'Outcomes'), element('strong', '', String(market.outcomes.length)));
   stats.append(poolStat, tradesStat, oddsStat);
 
   const outcomeSection = element('section', 'outcome-section');
@@ -407,7 +341,7 @@ function renderMarketDetail() {
     const row = element('li', 'outcome-row');
     const outcomeIdentity = element('div', 'outcome-identity');
     const badge = element('span', 'outcome-badge', String(index + 1).padStart(2, '0'));
-    badge.style.setProperty('--badge-color', initialColors[index % initialColors.length]);
+    badge.style.setProperty('--badge-color', seriesColor(index));
     const name = element('span', 'outcome-name', outcome.label);
     const identityDetails = element('div', 'outcome-identity-details');
     identityDetails.append(name);
@@ -452,7 +386,15 @@ function renderMarketDetail() {
       sellButton.setAttribute('aria-label', `Sell ${formatPoints(sellAmount)} worth of ${outcome.label} at the current market price. Maximum available: ${formatPoints(estimate)}.`);
       sellButton.title = `Maximum available: ${formatPoints(estimate)}`;
       sellButton.disabled = !validStake || market.status !== 'open' || sellAmount < 0.01;
-      actions.append(sellButton);
+      const sellAllButton = element('button', 'sell-all-button', 'Sell all');
+      sellAllButton.type = 'button';
+      sellAllButton.dataset.sellOutcomeId = outcome.id;
+      sellAllButton.dataset.sellAll = 'true';
+      sellAllButton.dataset.outcomeLabel = outcome.label;
+      sellAllButton.setAttribute('aria-label', `Sell your whole ${outcome.label} position at the current market price, about ${formatPoints(estimate)}.`);
+      sellAllButton.disabled = market.status !== 'open' || estimate < 0.01;
+      const sellValue = element('small', 'sell-value', `Worth ${formatPoints(estimate)} now`);
+      actions.append(sellButton, sellAllButton, sellValue);
     }
 
     row.append(outcomeIdentity, chanceCell, actions);
@@ -462,7 +404,6 @@ function renderMarketDetail() {
 
   const explanation = element('p', 'detail-footnote');
   explanation.append(
-    element('span', 'footnote-icon', 'i'),
     document.createTextNode('Prices use a simulated $1 contract scale. Points have no cash value; there are no real-money trades, prizes, or payouts.'),
   );
 
@@ -475,6 +416,12 @@ function render() {
   renderHeader();
   renderMarketList();
   renderMarketDetail();
+}
+
+// One key per trade click: the server returns the original result for a
+// replayed key instead of trading twice.
+function tradeRequestKey() {
+  return globalThis.crypto?.randomUUID?.() || `k-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function requestApi(path, options = {}) {
@@ -506,10 +453,16 @@ async function refreshSelectedMarketData() {
     : Promise.resolve({ position: {}, costBasis: {} });
   const [historyResult, positionResult] = await Promise.allSettled([historyRequest, positionRequest]);
   if (marketId !== state.selectedId) return;
+  // The history endpoint is CDN-cached, so a fetch made right after our own trade can return
+  // an older copy than the one the trade response gave us. Never replace newer with older.
+  const heldHistory = state.priceHistoryMarketId === marketId ? state.priceHistory : [];
+  const latestMarket = state.markets.find((item) => item.id === marketId) || market;
   state.priceHistoryMarketId = marketId;
-  state.priceHistory = historyResult.status === 'fulfilled'
-    ? historyResult.value.priceHistory || []
-    : market.priceHistory || [];
+  state.priceHistory = freshestHistory(
+    historyResult.status === 'fulfilled' ? historyResult.value.priceHistory || [] : [],
+    heldHistory,
+    latestMarket.priceHistory || [],
+  );
   state.position = positionResult.status === 'fulfilled' ? positionResult.value.position || {} : {};
   state.costBasis = positionResult.status === 'fulfilled' ? positionResult.value.costBasis || {} : {};
   if (positionResult.status === 'rejected' && state.profile) state.marketError = positionResult.reason.message;
@@ -522,11 +475,21 @@ function writePreview() {
   } catch { /* The local preview still works until the page is closed. */ }
 }
 
-async function refreshMarkets() {
+let marketsRefreshing = null;
+function refreshMarkets() {
+  if (!marketsRefreshing) marketsRefreshing = loadMarkets().finally(() => { marketsRefreshing = null; });
+  return marketsRefreshing;
+}
+
+async function loadMarkets() {
   try {
     const result = await requestApi('/api/markets', { method: 'GET' });
     if (!Array.isArray(result.markets)) throw new Error('Market response is incomplete.');
-    state.markets = result.markets;
+    // Keep a market we already hold when the fetched copy is older (cached list after a trade).
+    state.markets = result.markets.map((fetched) => {
+      const held = state.markets.find((item) => item.id === fetched.id);
+      return held && historyStamp(held.priceHistory) > historyStamp(fetched.priceHistory) ? held : fetched;
+    });
     state.marketError = '';
   } catch (error) {
     if (previewMode) {
@@ -729,7 +692,7 @@ function openCreateDialog() {
   }
   if (atMarketLimit) {
     el.createSetupHint.hidden = false;
-    el.createSetupHint.textContent = 'This account has reached its 10-market creation limit.';
+    el.createSetupHint.textContent = 'This account cannot create more markets right now.';
   }
   el.createDialog.showModal();
 }
@@ -818,6 +781,7 @@ async function backOutcome(outcomeId) {
   try {
     const result = await requestApi(`/api/markets/${encodeURIComponent(market.id)}/back`, {
       method: 'POST',
+      headers: { 'Idempotency-Key': tradeRequestKey() },
       body: JSON.stringify({ outcomeId, amount: state.stake }),
     });
     state.profile = result.profile;
@@ -833,7 +797,7 @@ async function backOutcome(outcomeId) {
   }
 }
 
-async function sellOutcome(outcomeId, amount) {
+async function sellOutcome(outcomeId, amount, all = false) {
   const market = state.markets.find((item) => item.id === state.selectedId);
   if (!market) return;
   if (!state.profile) {
@@ -844,7 +808,8 @@ async function sellOutcome(outcomeId, amount) {
   try {
     const result = await requestApi(`/api/markets/${encodeURIComponent(market.id)}/sell`, {
       method: 'POST',
-      body: JSON.stringify({ outcomeId, amount }),
+      headers: { 'Idempotency-Key': tradeRequestKey() },
+      body: JSON.stringify(all ? { outcomeId, all: true } : { outcomeId, amount }),
     });
     state.profile = result.profile;
     state.markets = state.markets.map((item) => item.id === market.id ? result.market : item);
@@ -868,13 +833,16 @@ el.marketList.addEventListener('click', (event) => {
   state.priceHistory = [];
   state.priceHistoryMarketId = state.selectedId;
   render();
-  refreshSelectedMarketData();
+  // Re-fetch the markets themselves (not just history/position) so prices and the
+  // sell quote reflect trades made since the page first loaded.
+  refreshMarkets();
 });
 
 el.marketDetail.addEventListener('click', (event) => {
   const sellButton = event.target.closest('button[data-sell-outcome-id]');
   if (sellButton) {
-    sellOutcome(sellButton.dataset.sellOutcomeId, Number(sellButton.dataset.sellAmount));
+    if (sellButton.dataset.sellAll === 'true') sellOutcome(sellButton.dataset.sellOutcomeId, 0, true);
+    else sellOutcome(sellButton.dataset.sellOutcomeId, Number(sellButton.dataset.sellAmount));
     return;
   }
   const button = event.target.closest('button[data-outcome-id]');
@@ -959,6 +927,17 @@ if (auth) {
     await loadProfile(user);
   });
 }
+
+// Keep the open market's prices and sell quotes current. Skip a tick while the person is
+// typing in the market panel, hovering the chart, or using a dialog, so nothing jumps.
+const MARKET_POLL_MS = 10000;
+window.setInterval(() => {
+  if (document.visibilityState !== 'visible' || !state.selectedId) return;
+  if (document.querySelector('dialog[open]')) return;
+  if (el.marketDetail.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
+  if (el.marketDetail.querySelector('.price-chart-frame:hover')) return;
+  refreshMarkets();
+}, MARKET_POLL_MS);
 
 setAuthMode('signin');
 render();

@@ -3,9 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#0e1720" />
+    <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="A points-only prediction market for club-created questions." />
     <title>Philomarket — Club prediction markets</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>
@@ -13,8 +16,7 @@
     <div class="app-frame">
       <header class="topbar">
         <a class="brand" href="#markets" aria-label="Philomarket markets">
-          <span class="brand-glyph" aria-hidden="true">p</span>
-          <span>philomarket</span>
+          <span>Philomarket</span>
         </a>
         <nav class="primary-nav" aria-label="Main navigation">
           <a class="nav-link is-current" href="#markets" aria-current="page">Markets</a>
@@ -34,11 +36,11 @@
         <div id="environment-banner" class="environment-banner" hidden></div>
         <section class="page-heading" aria-labelledby="page-title">
           <div>
-            <p class="page-eyebrow"><span class="market-status-dot" aria-hidden="true"></span> Club markets</p>
+            <p class="page-eyebrow">Club markets</p>
             <h1 id="page-title">Markets</h1>
             <p class="page-subtitle">Make a forecast. Use points. No money changes hands.</p>
           </div>
-          <button id="create-market-button" class="primary-button" type="button"><span aria-hidden="true">＋</span> Create a market</button>
+          <button id="create-market-button" class="primary-button" type="button">Create a market</button>
         </section>
 
         <section class="market-tools" aria-label="Market filters">
@@ -49,14 +51,13 @@
           <div class="tool-controls">
             <label class="search-field">
               <span class="visually-hidden">Search markets</span>
-              <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.6"></circle><path d="m13 13 4 4"></path></svg>
               <input id="market-search" type="search" placeholder="Search markets" autocomplete="off" />
               <kbd>/</kbd>
             </label>
             <label class="sort-field">
               <span class="visually-hidden">Sort markets</span>
               <select id="market-sort" aria-label="Sort markets">
-                <option value="active">Highest liquidity</option>
+                <option value="active">Most active</option>
                 <option value="newest">Newest</option>
                 <option value="alphabetical">A–Z</option>
               </select>
@@ -72,11 +73,10 @@
             </div>
             <div id="market-list" class="market-list" aria-live="polite"></div>
             <div id="empty-markets" class="empty-state" hidden>
-              <span class="empty-mark" aria-hidden="true">◇</span>
               <strong>No markets found</strong>
               <span>Try a different search, or create a new market.</span>
             </div>
-            <p class="list-note"><span class="info-mark" aria-hidden="true">i</span> Market odds reflect community practice points, not real-world certainty.</p>
+            <p class="list-note">Market odds reflect community practice points, not real-world certainty.</p>
           </aside>
 
           <section id="market-detail" class="market-detail" aria-live="polite" aria-labelledby="detail-title">
@@ -86,7 +86,7 @@
       </main>
 
       <footer class="app-footer">
-        <span>philomarket</span>
+        <span>Philomarket</span>
         <span>Points are for fun and have no cash value.</span>
       </footer>
     </div>
@@ -94,7 +94,6 @@
     <dialog id="auth-dialog" class="modal-dialog" aria-labelledby="auth-title">
       <form id="auth-form" class="modal-card" novalidate>
         <button class="modal-close" type="button" data-close-dialog="auth-dialog" aria-label="Close sign in">×</button>
-        <div class="modal-emblem" aria-hidden="true">p</div>
         <p class="modal-kicker">Your club account</p>
         <h2 id="auth-title">Sign in to Philomarket</h2>
         <p id="auth-copy" class="modal-copy">Verify your email to get 500 practice points and join the markets.</p>
@@ -106,7 +105,6 @@
           <input id="auth-password" type="password" autocomplete="current-password" minlength="8" placeholder="At least 8 characters" required />
         </div>
         <div id="verify-panel" class="verify-panel" hidden>
-          <span class="verify-icon" aria-hidden="true">✉</span>
           <strong>Check your inbox</strong>
           <span>We sent a verification link. Open it, come back here, then check your status.</span>
           <button id="check-verification" class="secondary-button" type="button">I verified my email</button>
@@ -123,10 +121,9 @@
     <dialog id="create-dialog" class="modal-dialog" aria-labelledby="create-title">
       <form id="create-form" class="modal-card create-card" novalidate>
         <button class="modal-close" type="button" data-close-dialog="create-dialog" aria-label="Close create market">×</button>
-        <div class="modal-emblem create-emblem" aria-hidden="true">＋</div>
         <p class="modal-kicker">Open a new question</p>
         <h2 id="create-title">Create a market</h2>
-        <p class="modal-copy">Keep it clear, answerable, and fun. Each outcome gets an equal chance to start. Accounts can create up to 10 markets.</p>
+        <p class="modal-copy">Keep it clear, answerable, and fun. Each outcome gets an equal chance to start.</p>
         <label for="market-question">Market question</label>
         <input id="market-question" maxlength="140" placeholder="What will happen?" required />
         <label for="market-outcomes">Outcomes <span>2–12, one per line</span></label>

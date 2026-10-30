@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { canonicalEmail } from './abuseEmail.js';
 
 export const STARTING_POINTS = 500;
 export const TRADE_COOLDOWN_MS = 2_000;
@@ -7,8 +8,12 @@ function normalizeEmail(email) {
   return typeof email === 'string' ? email.trim().toLowerCase() : '';
 }
 
+// The binding is keyed by the canonical mailbox, so case, "+tag", and Gmail
+// dot variants of one inbox all map to the same binding. Existing bindings
+// keyed by the older trim+lowercase form stay valid for addresses whose
+// canonical form is unchanged; other accounts get a new binding on next use.
 function emailBindingRef(db, email) {
-  const key = createHash('sha256').update(normalizeEmail(email)).digest('hex');
+  const key = createHash('sha256').update(canonicalEmail(normalizeEmail(email))).digest('hex');
   return db.collection('accountEmails').doc(key);
 }
 
@@ -78,6 +83,6 @@ export function enforceTradeCooldown(userData) {
   const lastTradeAt = userData.lastTradeAt?.toMillis?.();
   if (!Number.isFinite(lastTradeAt)) return;
   if (Date.now() - lastTradeAt < TRADE_COOLDOWN_MS) {
-    throw Object.assign(new Error('Wait a couple of seconds before placing another trade.'), { status: 429 });
+    throw Object.assign(new Error('Too many trades too quickly. Try again in a moment.'), { status: 429 });
   }
 }

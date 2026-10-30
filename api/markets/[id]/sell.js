@@ -1,6 +1,6 @@
 import { getAdminServices } from '../../../server/firebaseAdmin.js';
 import { handleApiError, methodNotAllowed, profileFrom, readJson, requireVerifiedUser, sendJson } from '../../../server/http.js';
-import { appendPriceHistory, floorPoints, MARKET_LIQUIDITY, proceedsForSale, roundPoints, roundShares, sharesForSaleAmount } from '../../../marketMath.js';
+import { appendPriceHistory, floorPoints, MARKET_LIQUIDITY, parsePointAmount, proceedsForSale, roundPoints, roundShares, sharesForSaleAmount } from '../../../marketMath.js';
 import { enforceTradeCooldown, readAccountContext, writeAccountContext } from '../../../server/accounts.js';
 
 function validMarketId(value) {
@@ -29,11 +29,13 @@ export default async function handler(req, res) {
   try {
     const decoded = await requireVerifiedUser(req);
     const body = await readJson(req);
-    const rawAmount = Number(body?.amount);
-    const amount = roundPoints(rawAmount);
+    // `all: true` sells the whole position at the server's current quote, so a
+    // client holding a stale market snapshot can still exit at today's price.
+    const sellAll = body?.all === true;
+    const requestedAmount = parsePointAmount(body?.amount);
     const marketId = req.query?.id;
     const outcomeId = typeof body?.outcomeId === 'string' ? body.outcomeId : '';
-    if (!Number.isFinite(rawAmount) || rawAmount < 0.01 || Math.abs(rawAmount - amount) > 1e-8) {
+    if (!sellAll && requestedAmount === null) {
       throw Object.assign(new Error('Enter the point amount you want to sell from this pick.'), { status: 400 });
     }
     if (!validMarketId(marketId)) throw Object.assign(new Error('Market not found.'), { status: 404 });
@@ -87,12 +89,20 @@ export default async function handler(req, res) {
         proceedsForSale(outcomes, outcomeIndex, availableShares, liquidity),
         pointPool,
       ));
+      // A sell-all whose quote floors below one cent closes the leftover dust
+      // for 0 points instead of leaving an unsellable position behind.
+      const closeDust = sellAll && maxProceeds < 0.01;
+      const amount = sellAll ? maxProceeds : requestedAmount;
       if (amount > maxProceeds) {
         throw Object.assign(new Error(`This pick can currently sell for at most ${maxProceeds} points.`), { status: 409 });
       }
-      const soldShares = sharesForSaleAmount(outcomes, outcomeIndex, amount, availableShares, liquidity);
+      const soldShares = closeDust
+        ? availableShares
+        : sharesForSaleAmount(outcomes, outcomeIndex, amount, availableShares, liquidity);
       if (soldShares <= 0) throw Object.assign(new Error('This position is too small to sell for that amount.'), { status: 409 });
-      const proceeds = Math.min(amount, floorPoints(proceedsForSale(outcomes, outcomeIndex, soldShares, liquidity)));
+      const proceeds = closeDust
+        ? 0
+        : Math.min(amount, floorPoints(proceedsForSale(outcomes, outcomeIndex, soldShares, liquidity)));
       if (proceeds < amount) throw Object.assign(new Error('The quote changed. Refresh and try again.'), { status: 409 });
 
       outcomes[outcomeIndex] = {
